@@ -823,7 +823,7 @@ class TestExternalAPIs:
             captured_payload["items"] = items
             return [0, 1, 1]
 
-        monkeypatch.setattr("core.embeddings.cluster_quiz_titles", fake_cluster_quiz_titles)
+        monkeypatch.setattr(recommendation_api, "cluster_quiz_titles", fake_cluster_quiz_titles)
 
         captured_prompts = []
 
@@ -834,7 +834,7 @@ class TestExternalAPIs:
                     return SimpleNamespace(content="Databases")
                 return SimpleNamespace(content="Programming")
 
-        monkeypatch.setattr("core.llm.get_llm_client", lambda: FakeLLM())
+        monkeypatch.setattr(recommendation_api, "get_llm_client", lambda: FakeLLM())
 
         app = _create_app(recommendation_routes)
         response = app.test_client().post(
@@ -881,6 +881,52 @@ class TestExternalAPIs:
         assert len(captured_prompts) == 2
         assert "Question: What keyword starts a loop?" in captured_payload["items"][0]
         assert "Correct answer: for" in captured_payload["items"][0]
+
+    def test_warm_cluster_cache_for_user_builds_cache_from_user_quizzes(self, monkeypatch):
+        recommendation_api._cluster_cache.clear()
+        recommendation_api._cluster_warmups.clear()
+
+        class ImmediateThread:
+            starts = 0
+
+            def __init__(self, target, daemon):
+                self.target = target
+                self.daemon = daemon
+
+            def start(self):
+                ImmediateThread.starts += 1
+                self.target()
+
+        monkeypatch.setattr(recommendation_api.threading, "Thread", ImmediateThread)
+        monkeypatch.setattr(recommendation_api, "get_db", lambda: _FakeDb([
+            {
+                "title": "Python loops",
+                "userId": "user-1",
+                "questions": [{"question_text": "What starts a loop?", "answers": []}],
+            },
+            {
+                "title": "SQL joins",
+                "userId": "user-1",
+                "questions": [{"question_text": "What joins rows?", "answers": []}],
+            },
+            {
+                "title": "Other user",
+                "userId": "user-2",
+                "questions": [],
+            },
+        ]))
+        monkeypatch.setattr(recommendation_api, "cluster_quiz_titles", lambda items: [0, 1])
+        monkeypatch.setattr(recommendation_api, "get_llm_client", lambda: None)
+
+        recommendation_api.warm_cluster_cache_for_user("user-1")
+
+        cached = recommendation_api._cluster_cache["user-1"]
+        assert cached["status"] == "ready"
+        assert cached["clusters"] == [0, 1]
+        assert cached["count"] == 2
+
+        recommendation_api.warm_cluster_cache_for_user("user-1")
+        assert ImmediateThread.starts == 1
 
     def test_cluster_extract_returns_missing_without_cache(self, monkeypatch):
         recommendation_api._cluster_cache.clear()

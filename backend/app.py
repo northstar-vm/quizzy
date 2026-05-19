@@ -1,8 +1,7 @@
 import os
 import logging
-import threading
-import time
 from flask import Flask
+from flask_login import current_user
 from config import init_app, IS_PRODUCTION
 
 from api.auth import auth_routes
@@ -11,8 +10,6 @@ from api.chat import chat_routes
 from api.recommendations import recommendation_routes
 
 
-clustering_started = False
-clustering_lock = threading.Lock()
 logger = logging.getLogger(__name__)
 
 
@@ -34,25 +31,6 @@ for noisy_logger in (
     logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 
-def trigger_clustering_lazy():
-    global clustering_started
-    
-    with clustering_lock:
-        if clustering_started:
-            return
-        clustering_started = True
-    
-    def run_clustering_background():
-        try:
-            from core.embeddings import run_full_clustering
-            run_full_clustering()
-        except Exception as e:
-            logger.exception("Background clustering failed")
-    
-    thread = threading.Thread(target=run_clustering_background, daemon=True)
-    thread.start()
-
-
 app = Flask(__name__)
 init_app(app)
 
@@ -64,13 +42,14 @@ app.register_blueprint(recommendation_routes)
 
 @app.route('/', methods=['GET', 'HEAD'])
 def health_check():
-    trigger_clustering_lazy()
     return "OK", 200
 
 
 @app.before_request
 def before_request_handler():
-    trigger_clustering_lazy()
+    if current_user and current_user.is_authenticated:
+        from api.recommendations import warm_cluster_cache_for_user
+        warm_cluster_cache_for_user(current_user.get_db_id())
 
 
 if __name__ == '__main__':

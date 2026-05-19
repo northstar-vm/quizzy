@@ -1,9 +1,10 @@
 import json
 import logging
+import threading
 from flask import Blueprint, jsonify, request
 from flask_login import login_required
 
-from config import get_current_user_db_id
+from config import get_current_user_db_id, get_db
 from core.embeddings import (
     build_quiz_clustering_texts,
     cluster_quiz_titles,
@@ -182,6 +183,8 @@ def get_library_stats():
 
 # Global cluster cache per user
 _cluster_cache = {}  # user_id -> { clusters: [], names: {}, hash: str }
+_cluster_warmups = set()
+_cluster_warmups_lock = threading.Lock()
 
 def get_list_hash(items: list) -> str:
     """Generate stable hash for list comparison"""
@@ -205,6 +208,81 @@ def _extract_cluster_inputs(data):
     return titles, build_quiz_clustering_texts(titles)
 
 
+def _build_cluster_result(titles, clustering_texts):
+    if len(titles) < 2:
+        return {
+            "status": "ready",
+            "clusters": [0] * len(titles),
+            "count": 1,
+            "names": {0: "Quizzes"},
+            "hash": get_list_hash(clustering_texts)
+        }
+
+    clusters = cluster_quiz_titles(clustering_texts)
+    cluster_count = len(set(clusters))
+    cluster_names = {}
+
+    llm_client = get_llm_client()
+    if llm_client:
+        cluster_titles = {}
+        for idx, cluster_id in enumerate(clusters):
+            cluster_titles.setdefault(cluster_id, []).append(titles[idx])
+
+        for cluster_id, titles_in_cluster in cluster_titles.items():
+            try:
+                prompt = f"Give a VERY SHORT category name for these quiz titles. ONLY RETURN 1 TO 3 WORDS MAXIMUM. ABSOLUTELY NO EXTRA TEXT, NO DASHES, NO PUNCTUATION, JUST THE NAME:\n"
+                prompt += "\n".join([f"- {t}" for t in titles_in_cluster])
+                response = llm_client.invoke(prompt)
+                if response.content:
+                    name = response.content.strip().strip('"\'').title()
+                    name_words = name.split()
+                    if len(name_words) > 3:
+                        name = ' '.join(name_words[:3])
+                    cluster_names[cluster_id] = name
+            except Exception as e:
+                logger.warning("Error naming cluster %s: %s", cluster_id, e)
+
+    return {
+        "status": "ready",
+        "clusters": clusters,
+        "count": cluster_count,
+        "names": cluster_names,
+        "hash": get_list_hash(clustering_texts)
+    }
+
+
+def warm_cluster_cache_for_user(user_id):
+    """Build cluster cache for a logged-in user in the background."""
+    if not user_id:
+        return
+
+    cache_key = str(user_id)
+    with _cluster_warmups_lock:
+        if user_id in _cluster_cache or cache_key in _cluster_warmups:
+            return
+        _cluster_warmups.add(cache_key)
+
+    def run_warmup():
+        try:
+            quizzes = list(get_db().quizzes.find({"userId": user_id}))
+            titles = [
+                str(quiz.get('title', '')).strip() or 'Untitled Quiz'
+                for quiz in quizzes
+            ]
+            clustering_texts = build_quiz_clustering_texts(quizzes)
+
+            result = _build_cluster_result(titles, clustering_texts)
+            _cluster_cache[user_id] = result
+            logger.info("Warmed cluster cache for user %s with %s quizzes", user_id, len(titles))
+        except Exception:
+            logger.exception("Cluster cache warmup failed for user %s", user_id)
+        finally:
+            with _cluster_warmups_lock:
+                _cluster_warmups.discard(cache_key)
+
+    threading.Thread(target=run_warmup, daemon=True).start()
+
+
 @recommendation_routes.route('/api/cluster-quizzes/clusterize', methods=['POST'])
 def cluster_quizzes_full():
     """
@@ -219,12 +297,7 @@ def cluster_quizzes_full():
         user_id = get_current_user_db_id() or "guest"
         
         if len(titles) < 2:
-            result = {
-                "clusters": [0] * len(titles),
-                "count": 1,
-                "names": {0: "Quizzes"},
-                "hash": get_list_hash(clustering_texts)
-            }
+            result = _build_cluster_result(titles, clustering_texts)
             _cluster_cache[user_id] = result
             _log_final_json("FINAL_CLUSTER_RESULT_JSON", {
                 "user_id": user_id,
@@ -233,44 +306,8 @@ def cluster_quizzes_full():
                 "result": result,
             })
             return jsonify(result)
-        
-        from core.embeddings import cluster_quiz_titles
-        from core.llm import get_llm_client
-        
-        # Generate fresh clusters just for this exact list
-        clusters = cluster_quiz_titles(clustering_texts)
 
-        cluster_count = len(set(clusters))
-        cluster_names = {}
-        
-        # Generate names for these specific clusters
-        llm_client = get_llm_client()
-        if llm_client:
-            cluster_titles = {}
-            for idx, cluster_id in enumerate(clusters):
-                cluster_titles.setdefault(cluster_id, []).append(titles[idx])
-
-            for cluster_id, titles_in_cluster in cluster_titles.items():
-                try:
-                    prompt = f"Give a VERY SHORT category name for these quiz titles. ONLY RETURN 1 TO 3 WORDS MAXIMUM. ABSOLUTELY NO EXTRA TEXT, NO DASHES, NO PUNCTUATION, JUST THE NAME:\n"
-                    prompt += "\n".join([f"- {t}" for t in titles_in_cluster])
-                    response = llm_client.invoke(prompt)
-                    if response.content:
-                        name = response.content.strip().strip('"\'').title()
-                        name_words = name.split()
-                        if len(name_words) > 3:
-                            name = ' '.join(name_words[:3])
-                        cluster_names[cluster_id] = name
-                except Exception as e:
-                    logger.warning("Error naming cluster %s: %s", cluster_id, e)
-        
-        result = {
-            "status": "ready",
-            "clusters": clusters,
-            "count": cluster_count,
-            "names": cluster_names,
-            "hash": get_list_hash(clustering_texts)
-        }
+        result = _build_cluster_result(titles, clustering_texts)
         
         # Cache this result permanently for this user
         _cluster_cache[user_id] = result

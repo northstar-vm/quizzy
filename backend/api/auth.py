@@ -70,6 +70,8 @@ def google_callback():
         user_obj = User(user_data)
         login_user(user_obj, remember=True, duration=datetime.timedelta(days=30))
 
+        from api.recommendations import warm_cluster_cache_for_user
+        warm_cluster_cache_for_user(user_data['_id'])
 
         return jsonify({
             "message": "Login successful",
