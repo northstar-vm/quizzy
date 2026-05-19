@@ -135,38 +135,35 @@ def cluster_quiz_titles(quiz_items):
     embeddings = generate_embeddings(clustering_texts)
     
     from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
     import numpy as np
     
     X = np.array(embeddings)
     
     max_k = min(10, len(clustering_texts) - 1)
-    wcss = []
+    candidates = []
     
-    for k in range(1, max_k + 1):
+    for k in range(2, max_k + 1):
         kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
-        kmeans.fit(X)
-        wcss.append(kmeans.inertia_)
+        labels = kmeans.fit_predict(X)
+        cluster_sizes = np.bincount(labels, minlength=k)
+        smallest_cluster = cluster_sizes.min()
+        largest_cluster_share = cluster_sizes.max() / len(clustering_texts)
+
+        if smallest_cluster < 2 and len(clustering_texts) >= 6:
+            continue
+
+        score = silhouette_score(X, labels)
+        if largest_cluster_share > 0.7:
+            score -= 0.15
+        score -= k * 0.01
+        candidates.append((score, k))
+
+    optimal_k = max(candidates)[1] if candidates else 1
     
-    if len(wcss) >= 3:
-        deltas = np.diff(wcss)
-        relative_improvement = deltas / wcss[:-1]
-        
-        candidates = np.where(relative_improvement < 0.25)[0]
-        
-        if len(candidates) > 0:
-            optimal_k = candidates[0] + 2
-        else:
-            second_deltas = np.diff(deltas)
-            optimal_k = np.argmax(second_deltas) + 2
-        
-        min_clusters = max(2, int(len(clustering_texts) / 6))
-        max_clusters = min(max_k, int(len(clustering_texts) / 2.5))
-        
-        optimal_k = max(optimal_k, min_clusters)
-        optimal_k = min(optimal_k, max_clusters)
-    else:
-        optimal_k = len(wcss)
-    
+    if optimal_k == 1:
+        return [0] * len(clustering_texts)
+
     final_kmeans = KMeans(n_clusters=optimal_k, n_init=10, random_state=42)
     clusters = final_kmeans.fit_predict(X)
     

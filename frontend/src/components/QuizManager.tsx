@@ -67,6 +67,12 @@ const QuizManager = ({
   const [clusterizeEnabled, setClusterizeEnabled] = useState(false);
   const [clusters, setClusters] = useState<number[] | null>(null);
   const [clusterNames, setClusterNames] = useState<{[key: number]: string} | null>(null);
+  const canClusterize = !!currentUser && userQuizList.length >= 2;
+  const clusterizeLabel = !currentUser
+    ? "Login to cluster quizzes"
+    : userQuizList.length < 2
+      ? "Need at least 2 quizzes"
+      : "Clusterize Quizzes";
 
   const buildClusterPayload = (quiz: QuizData) => ({
     title: quiz.title,
@@ -389,11 +395,12 @@ const QuizManager = ({
                         <Spinner animation="border" size="sm" className="me-2" />
                         Initializing clusters...
                       </>
-                    : "Clusterize Quizzes"
+                    : clusterizeLabel
                 }
                 checked={clusterizeEnabled}
-                disabled={clusterizeEnabled && !(clusters && clusterNames)}
+                disabled={!canClusterize || (clusterizeEnabled && !(clusters && clusterNames))}
                 onChange={() => {
+                    if (!canClusterize) return;
                     const newState = !clusterizeEnabled;
                     setClusterizeEnabled(newState);
 

@@ -814,6 +814,35 @@ class TestExternalAPIs:
         assert "Correct answer: for" in clustering_text
         assert "class" not in clustering_text
 
+    def test_cluster_quiz_titles_avoids_single_item_clusters(self, monkeypatch):
+        import core.embeddings as embeddings_api
+
+        monkeypatch.setattr(embeddings_api, "generate_embeddings", lambda texts: [
+            [1.0, 0.0],
+            [0.98, 0.02],
+            [0.02, 0.98],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [-0.98, -0.02],
+        ])
+
+        clusters = embeddings_api.cluster_quiz_titles([
+            "Python loops",
+            "Python functions",
+            "SQL joins",
+            "SQL selects",
+            "Geography capitals",
+            "Geography maps",
+        ])
+
+        cluster_sizes = {
+            cluster_id: clusters.count(cluster_id)
+            for cluster_id in set(clusters)
+        }
+
+        assert len(set(clusters)) == 3
+        assert min(cluster_sizes.values()) >= 2
+
     def test_clusterize_endpoint_returns_cluster_names(self, monkeypatch):
         recommendation_api._cluster_cache.clear()
         monkeypatch.setattr(recommendation_api, "get_current_user_db_id", lambda: "user-1")
