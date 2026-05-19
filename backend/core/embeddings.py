@@ -140,29 +140,26 @@ def cluster_quiz_titles(quiz_items):
     
     X = np.array(embeddings)
     
+    min_k = 2
     max_k = min(10, len(clustering_texts) - 1)
     candidates = []
     
-    for k in range(2, max_k + 1):
+    for k in range(min_k, max_k + 1):
         kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
         labels = kmeans.fit_predict(X)
         cluster_sizes = np.bincount(labels, minlength=k)
         smallest_cluster = cluster_sizes.min()
         largest_cluster_share = cluster_sizes.max() / len(clustering_texts)
 
-        if smallest_cluster < 2 and len(clustering_texts) >= 6:
-            continue
-
         score = silhouette_score(X, labels)
+        if smallest_cluster < 2 and len(clustering_texts) >= 6:
+            score -= 0.25
         if largest_cluster_share > 0.7:
             score -= 0.15
         score -= k * 0.01
         candidates.append((score, k))
 
-    optimal_k = max(candidates)[1] if candidates else 1
-    
-    if optimal_k == 1:
-        return [0] * len(clustering_texts)
+    optimal_k = max(candidates)[1] if candidates else min_k
 
     final_kmeans = KMeans(n_clusters=optimal_k, n_init=10, random_state=42)
     clusters = final_kmeans.fit_predict(X)

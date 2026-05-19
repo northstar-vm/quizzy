@@ -843,6 +843,29 @@ class TestExternalAPIs:
         assert len(set(clusters)) == 3
         assert min(cluster_sizes.values()) >= 2
 
+    def test_cluster_quiz_titles_keeps_multiple_clusters_for_mixed_quizzes(self, monkeypatch):
+        import core.embeddings as embeddings_api
+
+        monkeypatch.setattr(embeddings_api, "generate_embeddings", lambda texts: [
+            [1.0, 0.0],
+            [0.95, 0.05],
+            [0.9, 0.1],
+            [0.0, 1.0],
+            [0.05, 0.95],
+            [0.1, 0.9],
+        ])
+
+        clusters = embeddings_api.cluster_quiz_titles([
+            "Lithuanian geography",
+            "World history",
+            "Climate change",
+            "Human body systems",
+            "Nutrition basics",
+            "Sleep wellbeing",
+        ])
+
+        assert len(set(clusters)) >= 2
+
     def test_clusterize_endpoint_returns_cluster_names(self, monkeypatch):
         recommendation_api._cluster_cache.clear()
         monkeypatch.setattr(recommendation_api, "get_current_user_db_id", lambda: "user-1")
