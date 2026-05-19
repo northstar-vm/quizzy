@@ -14,6 +14,8 @@ from core.llm import get_llm_client
 
 RECOMMENDATION_THRESHOLD = 0.8
 MAX_RECOMMENDATIONS = 3
+RECOMMENDATION_CANDIDATE_LIMIT = 10
+MERGE_TIMESTAMP_GAP_SECONDS = 30
 
 
 recommendation_routes = Blueprint('recommendations', __name__)
@@ -22,6 +24,46 @@ logger = logging.getLogger(__name__)
 
 def _log_final_json(marker, payload):
     logger.info("%s %s", marker, json.dumps(payload, ensure_ascii=False, default=str))
+
+
+def _merge_recommendation_chunks(chunks):
+    chunks_by_video = {}
+    for chunk in chunks:
+        chunks_by_video.setdefault(chunk.get('video_id'), []).append(chunk)
+
+    merged_ranges = []
+    for video_id, video_chunks_for_video in chunks_by_video.items():
+        sorted_chunks = sorted(video_chunks_for_video, key=lambda chunk: chunk.get('start', 0))
+        ranges = []
+
+        for chunk in sorted_chunks:
+            if not ranges:
+                ranges.append({
+                    **chunk,
+                    'text_parts': [chunk.get('text', '')],
+                })
+                continue
+
+            current = ranges[-1]
+            gap = chunk.get('start', 0) - current.get('end', 0)
+            if gap <= MERGE_TIMESTAMP_GAP_SECONDS:
+                current['end'] = max(current.get('end', 0), chunk.get('end', 0))
+                current['score'] = max(current.get('score', 0), chunk.get('score', 0))
+                text = chunk.get('text', '')
+                if text and text not in current['text_parts']:
+                    current['text_parts'].append(text)
+            else:
+                ranges.append({
+                    **chunk,
+                    'text_parts': [chunk.get('text', '')],
+                })
+
+        best_range = max(ranges, key=lambda item: item.get('score', 0))
+        best_range['video_id'] = video_id
+        best_range['text'] = ' '.join(part for part in best_range.pop('text_parts') if part)
+        merged_ranges.append(best_range)
+
+    return sorted(merged_ranges, key=lambda item: item.get('score', 0), reverse=True)[:MAX_RECOMMENDATIONS]
 
 
 @recommendation_routes.route('/api/recommendations', methods=['POST'])
@@ -57,7 +99,12 @@ def get_recommendations():
             question_id = question.get('id')
             
             
-            recommendations = find_similar_videos(embeddings[idx], limit=MAX_RECOMMENDATIONS, min_score=RECOMMENDATION_THRESHOLD)
+            recommendations = find_similar_videos(
+                embeddings[idx],
+                limit=RECOMMENDATION_CANDIDATE_LIMIT,
+                min_score=RECOMMENDATION_THRESHOLD,
+            )
+            recommendations = _merge_recommendation_chunks(recommendations)
             
             
             formatted_recommendations = []
@@ -81,6 +128,7 @@ def get_recommendations():
             "incorrect_question_count": len(incorrect_questions),
             "threshold": RECOMMENDATION_THRESHOLD,
             "max_recommendations": MAX_RECOMMENDATIONS,
+            "candidate_limit": RECOMMENDATION_CANDIDATE_LIMIT,
             "input": incorrect_questions,
             "result": all_recommendations,
         })

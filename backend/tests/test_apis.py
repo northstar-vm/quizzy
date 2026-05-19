@@ -700,6 +700,85 @@ class TestExternalAPIs:
         assert payload["q1"]["recommendations"][0]["youtube_url"].endswith("abc123&t=30")
         assert payload["q1"]["recommendations"][0]["relevance_score"] == 0.9123
 
+    def test_recommendations_endpoint_merges_nearby_chunks_and_prefers_distinct_videos(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(recommendation_api, "generate_embeddings", lambda texts: [[0.1, 0.2]])
+
+        def fake_find_similar_videos(embedding, limit, min_score):
+            captured["limit"] = limit
+            captured["min_score"] = min_score
+            return [
+                {
+                    "video_id": "sleep1",
+                    "video_title": "Sleep Is Your Superpower",
+                    "text": "The first is regularity.",
+                    "start": 858.0,
+                    "end": 867.0,
+                    "score": 0.84,
+                },
+                {
+                    "video_id": "sleep1",
+                    "video_title": "Sleep Is Your Superpower",
+                    "text": "Go to bed at the same time.",
+                    "start": 867.0,
+                    "end": 875.0,
+                    "score": 0.83,
+                },
+                {
+                    "video_id": "sleep1",
+                    "video_title": "Sleep Is Your Superpower",
+                    "text": "Keep it cool.",
+                    "start": 885.0,
+                    "end": 895.0,
+                    "score": 0.82,
+                },
+                {
+                    "video_id": "focus2",
+                    "video_title": "Focus Better",
+                    "text": "Avoid late caffeine.",
+                    "start": 120.0,
+                    "end": 130.0,
+                    "score": 0.81,
+                },
+                {
+                    "video_id": "habits3",
+                    "video_title": "Better Habits",
+                    "text": "Keep a routine.",
+                    "start": 50.0,
+                    "end": 60.0,
+                    "score": 0.805,
+                },
+            ]
+
+        monkeypatch.setattr(recommendation_api, "find_similar_videos", fake_find_similar_videos)
+
+        app = _create_app(recommendation_routes)
+        response = app.test_client().post(
+            "/api/recommendations",
+            json={
+                "incorrect_questions": [
+                    {
+                        "id": "q1",
+                        "question_text": "How can I sleep better?",
+                        "correct_answer": "Regular schedule",
+                        "user_answer": "More naps",
+                    }
+                ]
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        recommendations = payload["q1"]["recommendations"]
+
+        assert captured == {"limit": 10, "min_score": 0.8}
+        assert [rec["video_id"] for rec in recommendations] == ["sleep1", "focus2", "habits3"]
+        assert recommendations[0]["start_time"] == 858.0
+        assert recommendations[0]["end_time"] == 895.0
+        assert recommendations[0]["text"] == (
+            "The first is regularity. Go to bed at the same time. Keep it cool."
+        )
+
     def test_recommendations_endpoint_requires_question_array(self):
         app = _create_app(recommendation_routes)
         response = app.test_client().post("/api/recommendations", json={})
